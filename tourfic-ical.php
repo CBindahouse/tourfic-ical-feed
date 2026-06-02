@@ -9,9 +9,10 @@
 
 defined( 'ABSPATH' ) || exit;
 
-define( 'TICAL_VERSION',      '1.0.0' );
-define( 'TICAL_OPTION_TOKEN', 'tourfic_ical_token' );
-define( 'TICAL_DAYS_PAST',    30 );
+define( 'TICAL_VERSION',            '1.1.0' );
+define( 'TICAL_OPTION_TOKEN',       'tourfic_ical_token' );
+define( 'TICAL_OPTION_SHOW_EMPTY',  'tourfic_ical_show_empty' );
+define( 'TICAL_DAYS_PAST',          30 );
 
 // ---------------------------------------------------------------------------
 // Activation
@@ -55,9 +56,19 @@ function tical_admin_page() {
 		echo '<div class="notice notice-success"><p><strong>Token regenerated.</strong> Update your calendar subscription with the new URL below.</p></div>';
 	}
 
-	$token       = get_option( TICAL_OPTION_TOKEN );
-	$feed_url    = esc_url( add_query_arg( 'tourfic_ical', $token, home_url( '/' ) ) );
-	$nonce_field = wp_nonce_field( 'tical_regenerate_token', 'tical_nonce', true, false );
+	// Handle settings save.
+	if (
+		isset( $_POST['tical_save_settings'] ) &&
+		check_admin_referer( 'tical_save_settings', 'tical_settings_nonce' )
+	) {
+		update_option( TICAL_OPTION_SHOW_EMPTY, ! empty( $_POST['tical_show_empty'] ) ? 1 : 0 );
+		echo '<div class="notice notice-success"><p><strong>Settings saved.</strong></p></div>';
+	}
+
+	$token        = get_option( TICAL_OPTION_TOKEN );
+	$feed_url     = esc_url( add_query_arg( 'tourfic_ical', $token, home_url( '/' ) ) );
+	$nonce_field  = wp_nonce_field( 'tical_regenerate_token', 'tical_nonce', true, false );
+	$show_empty   = (bool) get_option( TICAL_OPTION_SHOW_EMPTY, 0 );
 	?>
 	<div class="wrap">
 		<h1>Tourfic iCal Feed</h1>
@@ -88,6 +99,31 @@ function tical_admin_page() {
 				</td>
 			</tr>
 		</table>
+
+		<hr>
+
+		<h2>Settings</h2>
+		<form method="post">
+			<?php echo wp_nonce_field( 'tical_save_settings', 'tical_settings_nonce', true, false ); ?>
+			<table class="form-table" role="presentation">
+				<tr>
+					<th scope="row">Show available dates with no bookings</th>
+					<td>
+						<label>
+							<input
+								type="checkbox"
+								name="tical_show_empty"
+								value="1"
+								<?php checked( $show_empty ); ?>
+							/>
+							Include a placeholder event for each available tour date that has no bookings yet
+						</label>
+						<p class="description">When enabled, all dates listed in each tour's availability schedule appear on the calendar as <em>"Tour Name — No Bookings"</em>. As soon as a booking exists for that date the placeholder is replaced automatically.</p>
+					</td>
+				</tr>
+			</table>
+			<p><input type="submit" name="tical_save_settings" class="button button-primary" value="Save Settings"></p>
+		</form>
 
 		<hr>
 
@@ -130,6 +166,17 @@ function tical_maybe_serve_feed() {
 
 	$rows   = tical_get_bookings();
 	$groups = tical_group_bookings( $rows );
+
+	if ( get_option( TICAL_OPTION_SHOW_EMPTY ) ) {
+		$empty = tical_get_available_slots( array_fill_keys( array_keys( $groups ), true ) );
+		$groups = array_merge( $groups, $empty );
+		uasort( $groups, function ( $a, $b ) {
+			$ak = $a['post_id'] . $a['check_in'];
+			$bk = $b['post_id'] . $b['check_in'];
+			return strcmp( $ak, $bk );
+		} );
+	}
+
 	tical_output_ical( $groups );
 	exit;
 }
@@ -193,6 +240,71 @@ function tical_group_bookings( array $rows ) {
 
 		if ( $row['order_date'] > $groups[ $key ]['last_modified'] ) {
 			$groups[ $key ]['last_modified'] = $row['order_date'];
+		}
+	}
+
+	return $groups;
+}
+
+/**
+ * Returns placeholder groups for every available tour date that has no booking.
+ *
+ * @param array $booked_keys Map of "post_id|check_in" keys that already have bookings.
+ */
+function tical_get_available_slots( array $booked_keys ): array {
+	global $wpdb;
+
+	$cutoff = gmdate( 'Y-m-d', strtotime( '-' . TICAL_DAYS_PAST . ' days' ) );
+
+	// Fetch all published posts that have the tf_tours_opt meta (any Tourfic post type).
+	// phpcs:ignore WordPress.DB.DirectDatabaseQuery
+	$posts = $wpdb->get_results(
+		"SELECT p.ID, p.post_title, pm.meta_value
+		 FROM {$wpdb->posts} AS p
+		 INNER JOIN {$wpdb->postmeta} AS pm
+		         ON pm.post_id = p.ID AND pm.meta_key = 'tf_tours_opt'
+		 WHERE p.post_status = 'publish'",
+		ARRAY_A
+	);
+
+	$groups = array();
+
+	foreach ( $posts as $post ) {
+		$opts  = maybe_unserialize( $post['meta_value'] ) ?: array();
+		$avail = isset( $opts['tour_availability'] ) ? json_decode( $opts['tour_availability'], true ) : null;
+
+		if ( ! is_array( $avail ) ) {
+			continue;
+		}
+
+		foreach ( $avail as $date_key => $slot_data ) {
+			// Key format: "YYYY/MM/DD - YYYY/MM/DD"
+			if ( ! preg_match( '/^(\d{4}\/\d{2}\/\d{2}) - (\d{4}\/\d{2}\/\d{2})$/', $date_key, $m ) ) {
+				continue;
+			}
+
+			$check_in  = str_replace( '/', '-', $m[1] );
+			$check_out = str_replace( '/', '-', $m[2] );
+
+			if ( $check_in < $cutoff ) {
+				continue;
+			}
+
+			$key = $post['ID'] . '|' . $check_in;
+
+			if ( isset( $booked_keys[ $key ] ) ) {
+				continue; // Real booking exists — skip placeholder.
+			}
+
+			$groups[ $key ] = array(
+				'post_id'        => (int) $post['ID'],
+				'check_in'       => $check_in,
+				'check_out'      => $check_out,
+				'post_title'     => $post['post_title'] ?: 'Tour #' . $post['ID'],
+				'bookings'       => array(),
+				'last_modified'  => gmdate( 'Y-m-d H:i:s' ),
+				'is_placeholder' => true,
+			);
 		}
 	}
 
@@ -357,11 +469,18 @@ function tical_output_ical( array $groups ) {
 		$check_in  = $group['check_in'];
 		$check_out = $group['check_out'];
 
-		$last_mod       = gmdate( 'Ymd\THis\Z', strtotime( $group['last_modified'] ) );
-		$visitor_count  = tical_count_visitors( $group['bookings'] );
-		$summary        = $group['post_title'] . ' (' . $visitor_count . ' visitor' . ( $visitor_count !== 1 ? 's' : '' ) . ')';
-		$uid           = 'tourfic-' . $group['post_id'] . '-' . $check_in . '@' . $domain;
-		$description   = tical_format_description( $group['bookings'] );
+		$last_mod     = gmdate( 'Ymd\THis\Z', strtotime( $group['last_modified'] ) );
+		$uid          = 'tourfic-' . $group['post_id'] . '-' . $check_in . '@' . $domain;
+		$is_holder    = ! empty( $group['is_placeholder'] );
+
+		if ( $is_holder ) {
+			$summary     = $group['post_title'] . ' — No Bookings';
+			$description = 'No bookings yet for this date.';
+		} else {
+			$visitor_count = tical_count_visitors( $group['bookings'] );
+			$summary       = $group['post_title'] . ' (' . $visitor_count . ' visitor' . ( $visitor_count !== 1 ? 's' : '' ) . ')';
+			$description   = tical_format_description( $group['bookings'] );
+		}
 
 		$timing = tical_resolve_time_duration( $group );
 
