@@ -334,6 +334,22 @@ function tical_get_post_opts( int $post_id ): array {
 }
 
 /**
+ * Returns the max_capacity for a specific tour date slot, or null if not found.
+ * Uses check_in / check_out in YYYY-MM-DD format.
+ */
+function tical_get_slot_capacity( int $post_id, string $check_in, string $check_out ): ?int {
+	$opts  = tical_get_post_opts( $post_id );
+	$avail = isset( $opts['tour_availability'] ) ? json_decode( $opts['tour_availability'], true ) : null;
+	if ( ! is_array( $avail ) ) {
+		return null;
+	}
+	$cin  = str_replace( '-', '/', $check_in );
+	$cout = str_replace( '-', '/', $check_out );
+	$cap  = $avail[ "$cin - $cout" ]['max_capacity'] ?? null;
+	return ( $cap !== null && is_numeric( $cap ) ) ? (int) $cap : null;
+}
+
+/**
  * Resolves start time and duration for a booking group.
  *
  * Priority for start time:
@@ -471,14 +487,16 @@ function tical_output_ical( array $groups ) {
 
 		$last_mod     = gmdate( 'Ymd\THis\Z', strtotime( $group['last_modified'] ) );
 		$uid          = 'tourfic-' . $group['post_id'] . '-' . $check_in . '@' . $domain;
-		$is_holder    = ! empty( $group['is_placeholder'] );
+		$is_holder = ! empty( $group['is_placeholder'] );
+		$capacity  = tical_get_slot_capacity( $group['post_id'], $check_in, $check_out );
+		$cap_str   = $capacity !== null ? (string) $capacity : '?';
 
 		if ( $is_holder ) {
-			$summary     = $group['post_title'] . ' — No Bookings';
+			$summary     = '[0/' . $cap_str . '] ' . $group['post_title'];
 			$description = 'No bookings yet for this date.';
 		} else {
 			$visitor_count = tical_count_visitors( $group['bookings'] );
-			$summary       = $group['post_title'] . ' (' . $visitor_count . ' visitor' . ( $visitor_count !== 1 ? 's' : '' ) . ')';
+			$summary       = '[' . $visitor_count . '/' . $cap_str . '] ' . $group['post_title'];
 			$description   = tical_format_description( $group['bookings'] );
 		}
 
