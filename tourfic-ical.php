@@ -229,7 +229,7 @@ function tical_group_bookings( array $rows ) {
 			$groups[ $key ] = array(
 				'post_id'       => (int) $row['post_id'],
 				'check_in'      => $row['check_in'],
-				'check_out'     => $row['check_out'] ?: $row['check_in'],
+				'check_out'     => tical_normalize_check_out( $row['check_out'], $row['check_in'] ),
 				'post_title'    => $row['post_title'] ?: 'Tour #' . $row['post_id'],
 				'bookings'      => array(),
 				'last_modified' => $row['order_date'],
@@ -244,6 +244,18 @@ function tical_group_bookings( array $rows ) {
 	}
 
 	return $groups;
+}
+
+/**
+ * Normalizes a booking's check_out date. Tourfic stores '0000-00-00' (MySQL
+ * zero-date) for single-day tours instead of repeating the check_in date, so
+ * treat any empty/zero date as "same as check_in".
+ */
+function tical_normalize_check_out( $check_out, $check_in ) {
+	if ( ! $check_out || $check_out === '0000-00-00' ) {
+		return $check_in;
+	}
+	return $check_out;
 }
 
 /**
@@ -280,6 +292,10 @@ function tical_get_available_slots( array $booked_keys ): array {
 		foreach ( $avail as $date_key => $slot_data ) {
 			// Key format: "YYYY/MM/DD - YYYY/MM/DD"
 			if ( ! preg_match( '/^(\d{4}\/\d{2}\/\d{2}) - (\d{4}\/\d{2}\/\d{2})$/', $date_key, $m ) ) {
+				continue;
+			}
+
+			if ( ( $slot_data['status'] ?? '' ) !== 'available' ) {
 				continue;
 			}
 
