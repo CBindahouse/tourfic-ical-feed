@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Gateway Currency Converter
  * Description: Converts WooCommerce checkout prices to a per-gateway currency. Exchange rates are fetched daily from ExchangeRate-API (free, no key required). Optionally accepts an API key for higher reliability. Configure under Settings → Gateway Currency.
- * Version: 1.0.0
+ * Version: 1.0.1
  * Requires at least: 5.8
  * Requires PHP: 7.4
  * Requires Plugins: woocommerce
@@ -10,7 +10,7 @@
 
 defined( 'ABSPATH' ) || exit;
 
-define( 'GCC_VERSION',       '1.0.0' );
+define( 'GCC_VERSION',       '1.0.1' );
 define( 'GCC_OPT_MAPPINGS',  'gcc_gateway_mappings' );  // [gateway_id => currency_code]
 define( 'GCC_OPT_RATES',     'gcc_exchange_rates' );    // {base, rates, updated}
 define( 'GCC_OPT_API_KEY',   'gcc_api_key' );
@@ -172,8 +172,19 @@ function gcc_request_gateway( ?string $set = null ): string {
 function gcc_active_conversion(): ?array {
 	static $cache_key = null;
 	static $cache_val = null;
+	static $resolving = false;
 
 	if ( ! is_checkout() ) {
+		return null;
+	}
+
+	// Re-entrancy guard: resolving step 3 below instantiates the payment gateways,
+	// and gateways such as PayPal call get_woocommerce_currency() from their
+	// constructor. That runs back through the woocommerce_currency filter into
+	// gcc_filter_currency(), which calls this function again before $gateway_id
+	// has been resolved — causing infinite recursion. Bail out on the re-entrant
+	// call; at that point no gateway is known yet anyway.
+	if ( $resolving ) {
 		return null;
 	}
 
@@ -187,7 +198,9 @@ function gcc_active_conversion(): ?array {
 
 	// 3. First available gateway (initial page load with no session yet).
 	if ( ! $gateway_id ) {
+		$resolving = true;
 		$gateways   = WC()->payment_gateways()->get_available_payment_gateways();
+		$resolving = false;
 		$gateway_id = ! empty( $gateways ) ? (string) array_key_first( $gateways ) : '';
 	}
 
