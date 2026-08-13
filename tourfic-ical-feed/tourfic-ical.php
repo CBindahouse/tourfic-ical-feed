@@ -575,6 +575,15 @@ function tical_format_description( array $bookings ) {
 		if ( $phone ) $block .= " | Phone: {$phone}";
 		$block .= "\n";
 		$block .= "Adults: {$adult} | Children: {$child} | Infants: {$infants} | Total: \u{20AC}{$total}\n";
+
+		// Addons / extras purchased with the booking.
+		$addons = tical_parse_addons( $details['tour_extra'] ?? '' );
+		if ( $addons ) {
+			$block .= count( $addons ) === 1
+				? "Addons: {$addons[0]}\n"
+				: "Addons:\n  - " . implode( "\n  - ", $addons ) . "\n";
+		}
+
 		if ( $booked ) $block .= "Booked: {$booked}\n";
 
 		// Visitor details — double-encoded JSON string inside order_details.
@@ -588,13 +597,19 @@ function tical_format_description( array $bookings ) {
 					$dob    = $v['tf_dob'] ?? '';
 					$age    = $v['age'] ?? '';
 					$nid    = $v['tf_nid'] ?? '';
-					$nat    = strtoupper( $v['nationality'] ?? '' );
-					$wa     = $v['Whatsapp'] ?? '';
+					$nat    = tical_visitor_field( $v, array( 'nationality', 'country' ) );
+					$wa     = tical_visitor_field( $v, array( 'Whatsapp', 'whatsapp_number', 'whatsapp' ) );
 					$height = $v['height'] ?? '';
 					$weight = $v['weight'] ?? '';
 					$addr   = $v['muraddress'] ?? '';
 					$allerg = $v['allergies'] ?? '';
 					$other  = $v['mediother'] ?? '';
+
+					// Older forms stored an ISO code ("BE"), newer ones a full
+					// country name — only upper-case the former.
+					if ( strlen( $nat ) <= 3 ) {
+						$nat = strtoupper( $nat );
+					}
 
 					$gender  = tical_decode_values( (array) ( $v['gender'] ?? array() ),  tical_swim_map()['gender'] );
 					$swim    = tical_decode_values( (array) ( $v['swim'] ?? array() ),    tical_swim_map()['swim'] );
@@ -635,6 +650,78 @@ function tical_format_description( array $bookings ) {
 // Helpers
 // ---------------------------------------------------------------------------
 
+/**
+ * Returns the first non-empty value from a visitor record, trying each key in
+ * turn. The booking form has been revised over time (e.g. "nationality" became
+ * "country", "Whatsapp" became "whatsapp_number"), so older orders and newer
+ * orders carry the same information under different keys. Keys are matched
+ * case-sensitively — list every spelling that has been in use.
+ */
+function tical_visitor_field( array $visitor, array $keys ): string {
+	foreach ( $keys as $key ) {
+		$value = isset( $visitor[ $key ] ) ? trim( (string) $visitor[ $key ] ) : '';
+		if ( $value !== '' ) {
+			return $value;
+		}
+	}
+	return '';
+}
+
+/**
+ * Normalizes the order_details `tour_extra` field into a list of readable addon
+ * lines, e.g. "Dessert (Per Unit: €3.40*2=€6.80)".
+ *
+ * Tourfic stores this as an HTML-entity-encoded string; multiple addons are
+ * joined either with <br> tags or with ", " between the parenthesised entries.
+ * Some versions store an array/JSON structure instead, so both are handled.
+ */
+function tical_parse_addons( $raw ): array {
+	if ( is_string( $raw ) ) {
+		$decoded = json_decode( $raw, true );
+		if ( is_array( $decoded ) ) {
+			$raw = $decoded;
+		}
+	}
+
+	if ( is_array( $raw ) ) {
+		$items = array();
+		foreach ( $raw as $entry ) {
+			if ( is_array( $entry ) ) {
+				$name  = $entry['name'] ?? $entry['title'] ?? $entry['label'] ?? '';
+				$qty   = $entry['qty'] ?? $entry['quantity'] ?? '';
+				$price = $entry['price'] ?? $entry['total'] ?? '';
+				$entry = trim( $name . ( $qty !== '' ? " \u{00D7} {$qty}" : '' ) . ( $price !== '' ? " (\u{20AC}{$price})" : '' ) );
+			}
+			$items[] = (string) $entry;
+		}
+	} else {
+		$items = array( (string) $raw );
+	}
+
+	$addons = array();
+
+	foreach ( $items as $item ) {
+		// Split on <br> variants and literal newlines first.
+		foreach ( preg_split( '/<br\s*\/?>|\r\n|\r|\n/i', $item ) as $chunk ) {
+			// Then on ", " boundaries that follow a closing parenthesis, which is
+			// how Tourfic joins several extras into one string.
+			foreach ( preg_split( '/\)\s*,\s*(?=\S)/', $chunk ) as $part ) {
+				$part = trim( wp_strip_all_tags( html_entity_decode( $part, ENT_QUOTES | ENT_HTML5, 'UTF-8' ) ) );
+				if ( $part === '' ) {
+					continue;
+				}
+				// Restore the parenthesis consumed by the split above.
+				if ( substr_count( $part, '(' ) > substr_count( $part, ')' ) ) {
+					$part .= ')';
+				}
+				$addons[] = $part;
+			}
+		}
+	}
+
+	return $addons;
+}
+
 function tical_swim_map() {
 	return array(
 		'swim'    => array(
@@ -652,10 +739,20 @@ function tical_swim_map() {
 			'male'   => 'Male',
 			'female' => 'Female',
 		),
+		// Codes used by the medical section of the booking form. Older codes are
+		// kept alongside newer ones so historic orders still decode. Anything
+		// not listed here is passed through unchanged by tical_decode_values().
 		'medical' => array(
-			'mediheart' => 'Heart Condition',
-			'nomedic'   => 'No Medical Conditions',
-			'hernia'    => 'Hernia',
+			'mediheart'  => 'Heart Condition',
+			'nomedic'    => 'No Medical Conditions',
+			'hernia'     => 'Hernia',
+			'eyes'       => 'Eye Condition',
+			'surgery'    => 'Surgery',
+			'highblood'  => 'High Blood Pressure',
+			'pain'       => 'Pain',
+			'hxillness'  => 'History of Illness',
+			'hxdiabetes' => 'History of Diabetes',
+			'medimental' => 'Mental Health Condition',
 		),
 		'risk'    => array(
 			'acceptrisk' => 'Accept Risk',
