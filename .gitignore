@@ -1,1 +1,3 @@
 *.sql
+.claude
+*.code-workspace
